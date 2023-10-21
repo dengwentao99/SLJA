@@ -1,0 +1,177 @@
+import os
+from langchain import PromptTemplate, OpenAI
+from langchain.chains import LLMChain
+from tools.UTILS.utils import *
+from tools.IR.client import *
+
+KEYS = [
+    "OpenAI Key",
+]
+
+def syllogism_reasoning_func(fact):
+    os.environ["OPENAI_API_KEY"] = KEYS[0]
+    model_names = ["text-davinci-002", "text-davinci-003", "gpu-3.5-turbo"]
+    llm = OpenAI(model_name=model_names[0], temperature=0)
+
+    legal_articles_set = []
+    legal_articles_correct_process = []
+
+    for i in range(3):
+        if i == 0:
+            prompt_articles_list = PromptTemplate(
+                input_variables=["fact"],
+                template="基本案情：{fact}\n请根据基本案情列举出相关的法条，法条数目不超过5条，法条格式为：《法律名称》+第几条+【罪名】+罪名描述。法条的格式样例：《中华人民共和国刑法》第一条 【立法宗旨】为了惩罚犯罪，保护人民，根据宪法，结合我国同犯罪作斗争的具体 经验及实际情况，制定本法。",
+            )
+            chain_articles_list = LLMChain(llm=llm, prompt=prompt_articles_list)
+            legal_articles = chain_articles_list.predict(fact=fact)
+
+        else:
+            prompt_articles_list = PromptTemplate(
+                input_variables=["fact", "check_reasons"],
+                template="基本案情：\n{fact}\n修改意见：\n{check_reasons}\n请根据基本案情和修改意见列举出相关的法条，法条数目不超过5条，法条格式为：《法律名称》+第几条+【罪名】+罪名描述。法条的格式样例：《中华人民共和国刑法》第一条 【立法宗旨】为了惩罚犯罪，保护人民，根据宪法，结合我国同犯罪作斗争的具体 经验及实际情况，制定本法。",
+            )
+            chain_articles_list = LLMChain(llm=llm, prompt=prompt_articles_list)
+
+            legal_articles = chain_articles_list.predict(fact=fact, check_reasons=check_reasons)
+
+        correct_legal_articles = []
+        legal_articles0 = legal_articles
+        for kw in legal_articles.split('\n'):
+            if kw == '':
+                continue
+            correct_legal_articles += query(kw, 1)["answer"]
+        for cla in correct_legal_articles:
+            if cla['all'] in legal_articles_set:
+                continue
+            legal_articles_set.append(cla['all'])
+        legal_articles = '\n'.join(legal_articles_set)
+        if len(legal_articles) > 1000:
+            legal_articles = '\n'.join([i[:100] for i in legal_articles_set])
+
+        # 询问模型当前的法条是否已经能够概括所有的基本案情
+        prompt_check_article = PromptTemplate(
+            input_variables=["fact", "legal_articles"],
+            template="基本案情：\n{fact}\n当前检索得到的法条：\n{legal_articles}\n请判断当前检索得到的法条是否能够概括基本案情中的所有内容，请回答是或者否并换行说明原因。",
+        )
+        chain_check_articles = LLMChain(llm=llm, prompt=prompt_check_article)
+        articles_check = chain_check_articles.predict(fact=fact, legal_articles=legal_articles)
+        articles_check = articles_check.strip()
+        check_result = articles_check[:2]
+        check_reasons = articles_check[2:]
+        legal_articles_correct_process.append(
+            (legal_articles0, legal_articles, articles_check))
+        if check_result[0] == '是':
+            break
+        else:
+            pass
+
+    prompt_object = PromptTemplate(
+        input_variables=["fact"],
+        template="基本案情：\n{fact}\n请根据基本案情，抽取犯罪客体，并给出犯罪客体的分析，分析过程不超过50字。犯罪客体：刑法所保护而为犯罪所侵犯的社会关系。",
+    )
+    chain_object = LLMChain(llm=llm, prompt=prompt_object)
+    object = chain_object.predict(fact=fact)
+
+    prompt_objective = PromptTemplate(
+        input_variables=["fact"],
+        template="基本案情：\n{fact}\n请根据基本案情，抽取犯罪的客观方面。犯罪客观方面包括：犯罪时间、犯罪地点、犯罪行为、犯罪结果。每一项不超过50字。",
+    )
+    chain_objective = LLMChain(llm=llm, prompt=prompt_objective)
+    objective = chain_objective.predict(fact=fact)
+
+    prompt_subject = PromptTemplate(
+        input_variables=["fact"],
+        template="基本案情：\n{fact}\n请根据基本案情，抽取犯罪主体，并分析犯罪主体的构成要件，分析过程不超过50字。犯罪主体的构成要件包括：是否达到法定年龄、是否是完全行为能力人。",
+    )
+    chain_subject = LLMChain(llm=llm, prompt=prompt_subject)
+    subject = chain_subject.predict(fact=fact)
+
+    prompt_subjective = PromptTemplate(
+        input_variables=["fact"],
+        template="基本案情：\n{fact}\n请根据基本案情，抽取犯罪主观方面，并说明犯罪意图，犯罪意图的说明不超过50字。犯罪主观方面包括：故意和过失。",
+    )
+    chain_subjective = LLMChain(llm=llm, prompt=prompt_subjective)
+    subjective = chain_subjective.predict(fact=fact)
+
+    prompt_match = PromptTemplate(
+        input_variables=["legal_articles", "object", "objective", "subject", "subjective"],
+        template="""
+        相关法条：
+        {legal_articles}
+        
+        犯罪要件：
+        犯罪客体：{object}
+        犯罪客观方面：{objective}
+        犯罪主体：{subject}
+        犯罪主观方面：{subjective}
+        
+        请根据犯罪要件从相关法条中匹配出符合的法条，列举符合的法条以及法条中匹配的刑期并说明每一个法条匹配的原因，法条匹配的原因不超过50字。
+        匹配的法条格式：《法律名称》+第几条+【罪名】+罪名描述。
+        """,
+    )
+    chain_match = LLMChain(llm=llm, prompt=prompt_match)
+    match = chain_match.predict(legal_articles=legal_articles,
+                                object=object,
+                                objective=objective,
+                                subject=subject,
+                                subjective=subjective)
+
+    prompt_result = PromptTemplate(
+        input_variables=["match"],
+        template="""
+            法条的分析匹配结果：{match}
+            请根据法条的分析匹配结果，给出判决结果，判决结果包括：1.罪名；\n2.刑期。
+            罪名要严格遵守法条中的罪名，不可以自行生成罪名，列举出所有符合的罪名。
+            判决结果的格式为：罪名：盗窃罪\n刑期：三年以上五年以下有期徒刑。
+            """,
+    )
+    chain_result = LLMChain(llm=llm, prompt=prompt_result)
+    result = chain_result.predict(match=match)
+    result = correct_charge_name(result)
+    return legal_articles_correct_process, legal_articles, object, objective, subject, subjective, match, result
+
+
+
+if __name__ == '__main__':
+    original_path = 'test data path'
+    target_path = 'save data path'
+    start_idx = 0
+    idx = 0
+    length = 23913
+    error_num = 0
+    data_list = []
+    with open(original_path, 'r', encoding="utf-8") as f:
+        for line in f:
+            data_list.append(json.loads(line))
+    if not os.path.exists(os.path.join(target_path, 'all')):
+        os.makedirs(os.path.join(target_path, 'all'))
+    accu = 'all'
+    while idx < length:
+        current_data_list = os.listdir(os.path.join(target_path, accu))
+        data = data_list[start_idx + idx]
+        filename = str(idx)+'_test.json'
+        fact = data['fact']
+        fact = cut_off(fact, 2000)
+        legal_articles_correct_process, legal_articles, object, objective, subject, subjective, match, result = syllogism_reasoning_func(
+            fact)
+        data['chatgpt-generation'] = dict()
+        data['chatgpt-generation']['legal_articles_correct_process'] = []
+        for p in legal_articles_correct_process:
+            data['chatgpt-generation']['legal_articles_correct_process'].append(
+                {'ChatGPT-articles': p[0], 'retrieved-articles': p[1], 'ChatGPT-check-reasons': p[2]})
+        data['chatgpt-generation']['legal_articles'] = legal_articles
+        data['chatgpt-generation']['object'] = object
+        data['chatgpt-generation']['objective'] = objective
+        data['chatgpt-generation']['subject'] = subject
+        data['chatgpt-generation']['subjective'] = subjective
+        data['chatgpt-generation']['match'] = match
+        data['chatgpt-generation']['result'] = result
+        with open(os.path.join(os.path.join(target_path, 'all'), filename), 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)
+        if not os.path.exists(target_path + data['charge'][0]):
+            os.mkdir(os.path.join(target_path, data['charge'][0]))
+        with open(os.path.join(target_path, data['charge'][0], filename), 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)
+        idx += 1
+
+
